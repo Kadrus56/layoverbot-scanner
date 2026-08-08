@@ -76,3 +76,22 @@ jobs:
             artifacts/ecrew_layovers.json \
             ${{ secrets.ORACLE_USER }}@${{ secrets.ORACLE_HOST }}:/opt/layoverbot/artifacts/ecrew_layovers.json
           echo "roster delivered to Oracle"
+
+      # The same scrape also feeds the flight-history study (schedule vs actual
+      # times, crew churn, crew ranks). It used to be a separate daily job in the
+      # private repo, which meant paying metered minutes to re-scrape data this
+      # run already has in hand. Riding along here costs nothing.
+      #
+      # continue-on-error on purpose: this is measurement. It must never be able
+      # to fail a run whose real job — delivering the roster — already succeeded.
+      - name: Record snapshot in the flight-history study
+        if: success()
+        continue-on-error: true
+        run: |
+          test -f artifacts/ecrew_flights.json || { echo "no snapshot, skipping"; exit 0; }
+          rsync -avz -e "ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=accept-new" \
+            artifacts/ecrew_flights.json \
+            ${{ secrets.ORACLE_USER }}@${{ secrets.ORACLE_HOST }}:/opt/layoverbot/artifacts/ecrew_flights.json
+          ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=accept-new \
+            ${{ secrets.ORACLE_USER }}@${{ secrets.ORACLE_HOST }} \
+            "cd /opt/layoverbot && PYTHONPATH=/opt/layoverbot/scripts .venv/bin/python scripts/flight_history.py ingest artifacts/ecrew_flights.json && PYTHONPATH=/opt/layoverbot/scripts .venv/bin/python scripts/flight_history.py info"
