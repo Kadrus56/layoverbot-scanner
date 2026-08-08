@@ -1,0 +1,78 @@
+name: eCrew Layovers (hourly scan, delivered to Oracle)
+
+# Lives in a PUBLIC repo on purpose: GitHub Actions minutes are metered on a
+# private repo and unmetered on a public one, and this hourly scan is what was
+# burning through them. This repo holds no credentials and no operational
+# data — the crew list, dates, and cities it scrapes are handled entirely
+# inside this run and shipped straight to Oracle over SSH.
+
+on:
+  schedule:
+    - cron: '7 * * * *'
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'Days to scan'
+        default: '1'
+
+env:
+  PLAYWRIGHT_VERSION: '1.48.0'
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Cache Chromium
+        id: browser-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ env.PLAYWRIGHT_VERSION }}-chromium
+
+      - name: Install Playwright + Chromium
+        run: |
+          pip install --quiet "playwright==${PLAYWRIGHT_VERSION}"
+          if [ "${{ steps.browser-cache.outputs.cache-hit }}" = "true" ]; then
+            python -m playwright install-deps chromium
+          else
+            python -m playwright install --with-deps chromium
+          fi
+
+      - name: Run layover detection
+        env:
+          ECREW_USERNAME: ${{ secrets.ECREW_USERNAME }}
+          ECREW_PASSWORD: ${{ secrets.ECREW_PASSWORD }}
+          ECREW_DAYS: ${{ github.event.inputs.days || '1' }}
+          ECREW_BACKFILL: '1'
+        run: |
+          python scripts/ecrew_layovers.py
+
+      - name: Upload layover roster
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ecrew-layovers-json
+          path: artifacts/ecrew_layovers.json
+          if-no-files-found: warn
+
+      - name: Deliver roster to Oracle (so the bot can retro-add crews)
+        if: success()
+        run: |
+          test -f artifacts/ecrew_layovers.json || { echo "no roster file, skipping"; exit 0; }
+          mkdir -p ~/.ssh
+          echo "${{ secrets.ORACLE_SSH_KEY }}" > ~/.ssh/oracle_key
+          chmod 600 ~/.ssh/oracle_key
+          ssh-keyscan -H ${{ secrets.ORACLE_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=accept-new \
+            ${{ secrets.ORACLE_USER }}@${{ secrets.ORACLE_HOST }} 'mkdir -p /opt/layoverbot/artifacts'
+          rsync -avz -e "ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=accept-new" \
+            artifacts/ecrew_layovers.json \
+            ${{ secrets.ORACLE_USER }}@${{ secrets.ORACLE_HOST }}:/opt/layoverbot/artifacts/ecrew_layovers.json
+          echo "roster delivered to Oracle"
