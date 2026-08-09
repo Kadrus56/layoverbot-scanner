@@ -1,0 +1,150 @@
+name: Backfill flight history (past window, with crew)
+
+# Why this lives here and not in the private repo: a backfill over months is the
+# most expensive thing we run, and Actions minutes are metered on a private repo
+# and free on a public one. The private repo already ran out of them once.
+#
+# Why it runs in CHUNKS, one at a time:
+#   * a job is capped at 6 hours, and crew_all fetches a crew list for EVERY leg
+#     including domestic — roughly triple a normal scan;
+#   * one AIMS session at a time. Parallel chunks would mean parallel logins to
+#     the same account, which is how you get locked out of the thing you depend
+#     on. max-parallel is 1 on purpose. Slower, and it finishes.
+#   * a chunk that dies takes only its own window with it. Each chunk delivers
+#     its snapshot to Oracle as soon as it has one, so a run that fails halfway
+#     still leaves everything before the failure ingested.
+#
+# crew_all defaults ON here. Without it domestic legs carry no crew list, and a
+# crew that flew home and stayed there is invisible — which is exactly what made
+# the fat-layover ranking unusable. A backfill without crew_all would be a lot of
+# scraping for data that cannot answer the question.
+
+on:
+  workflow_dispatch:
+    inputs:
+      date_from:
+        description: 'Window start, e.g. 2026-02-01'
+        required: true
+      date_to:
+        description: 'Window end, e.g. 2026-07-31'
+        required: true
+      chunk_days:
+        description: 'Days per chunk. Smaller = more jobs, but each one is safely under the 6h cap.'
+        required: false
+        default: '7'
+      crew_all:
+        description: 'Fetch crew for EVERY leg, domestic included. Turn OFF only to probe how much schedule exists.'
+        required: false
+        default: '1'
+
+env:
+  PLAYWRIGHT_VERSION: '1.48.0'
+
+jobs:
+  # Splitting is its own job so the chunk list is visible in the run summary
+  # before any scraping starts — a wrong date range is cheap to spot here and
+  # expensive to discover four hours in.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      chunks: ${{ steps.split.outputs.chunks }}
+    steps:
+      - name: Split the window into chunks
+        id: split
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import datetime as dt, json, os
+
+          start = dt.date.fromisoformat("${{ github.event.inputs.date_from }}")
+          end = dt.date.fromisoformat("${{ github.event.inputs.date_to }}")
+          size = max(1, int("${{ github.event.inputs.chunk_days || '7' }}"))
+          if end < start:
+              raise SystemExit(f"to ({end}) is before from ({start})")
+
+          chunks = []
+          cursor = start
+          while cursor <= end:
+              last = min(cursor + dt.timedelta(days=size - 1), end)
+              chunks.append({"start": cursor.isoformat(), "end": last.isoformat()})
+              cursor = last + dt.timedelta(days=1)
+
+          # A matrix is capped at 256 entries. Say so plainly rather than letting
+          # GitHub truncate the list and silently scan less than was asked for.
+          if len(chunks) > 256:
+              raise SystemExit(
+                  f"{len(chunks)} chunks exceeds the 256-job matrix cap. "
+                  f"Raise chunk_days or split the window.")
+
+          print(f"chunks={json.dumps(chunks)}")
+          PY
+
+      - name: Show the plan
+        run: |
+          echo "Chunks to scan:"
+          echo '${{ steps.split.outputs.chunks }}' | python3 -c "import json,sys; [print(' ', c['start'], '..', c['end']) for c in json.load(sys.stdin)]"
+
+  scan:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        chunk: ${{ fromJson(needs.plan.outputs.chunks) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Cache Chromium
+        id: browser-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ env.PLAYWRIGHT_VERSION }}-chromium
+
+      - name: Install Playwright + Chromium
+        run: |
+          pip install --quiet "playwright==${PLAYWRIGHT_VERSION}"
+          if [ "${{ steps.browser-cache.outputs.cache-hit }}" = "true" ]; then
+            python -m playwright install-deps chromium
+          else
+            python -m playwright install --with-deps chromium
+          fi
+
+      # ECREW_BACKFILL=0: the window is given explicitly, so there is nothing to
+      # extend backwards from. The roster this produces is deliberately NOT
+      # delivered to the bot — it describes months that are over, and the bot
+      # would try to open crew chats for them.
+      - name: Scan ${{ matrix.chunk.start }} .. ${{ matrix.chunk.end }}
+        env:
+          ECREW_USERNAME: ${{ secrets.ECREW_USERNAME }}
+          ECREW_PASSWORD: ${{ secrets.ECREW_PASSWORD }}
+          ECREW_FROM: ${{ matrix.chunk.start }}
+          ECREW_TO: ${{ matrix.chunk.end }}
+          ECREW_BACKFILL: '0'
+          ECREW_CREW_ALL: ${{ github.event.inputs.crew_all || '1' }}
+        run: |
+          start=$(date +%s)
+          python scripts/ecrew_layovers.py
+          echo "chunk took $(( ($(date +%s) - start) / 60 )) min"
+
+      - name: Ingest the snapshot into the study history on Oracle
+        if: success()
+        run: |
+          test -f artifacts/ecrew_flights.json || { echo "no snapshot, skipping"; exit 0; }
+          mkdir -p ~/.ssh
+          echo "${{ secrets.ORACLE_SSH_KEY }}" > ~/.ssh/oracle_key
+          chmod 600 ~/.ssh/oracle_key
+          ssh-keyscan -H ${{ secrets.ORACLE_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=accept-new \
+            ${{ secrets.ORACLE_USER }}@${{ secrets.ORACLE_HOST }} 'mkdir -p /opt/layoverbot/artifacts'
+          rsync -avz -e "ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=accept-new" \
+            artifacts/ecrew_flights.json \
+            ${{ secrets.ORACLE_USER }}@${{ secrets.ORACLE_HOST }}:/opt/layoverbot/artifacts/ecrew_backfill.json
+          ssh -i ~/.ssh/oracle_key -o StrictHostKeyChecking=accept-new \
+            ${{ secrets.ORACLE_USER }}@${{ secrets.ORACLE_HOST }} \
+            "cd /opt/layoverbot && PYTHONPATH=/opt/layoverbot/scripts .venv/bin/python scripts/flight_history.py ingest artifacts/ecrew_backfill.json && PYTHONPATH=/opt/layoverbot/scripts .venv/bin/python scripts/flight_history.py info"
