@@ -406,6 +406,16 @@ async def main() -> None:
                     "actype": strip_tags(
                         row.get("actype") or row.get("acType") or row.get("ac_type")
                         or row.get("aircraft") or row.get("acTypeCode") or ""),
+                    # The tail number. AIMS serves NO aircraft-type field — the
+                    # row keys are arrival, crew, date, departure, flight,
+                    # gendecforms, legid, passengers, registrations, stand_gate —
+                    # so every guess above comes back empty and the fleet split
+                    # collapses into one bucket. The registration is the only
+                    # thing in the row that identifies the metal, and a tail maps
+                    # to a type. Store it now so six months of history can be
+                    # re-bucketed later from a tail->type table instead of being
+                    # scraped all over again.
+                    "registration": strip_tags(row.get("registrations") or ""),
                 }
                 n_new += 1
             print(f"  {d:%a %d/%m}: {len(rows)} flights ({n_new} new legs)")
@@ -614,6 +624,14 @@ async def main() -> None:
                     "dep_raw": lg.get("dep_raw", ""),
                     "arr_raw": lg.get("arr_raw", ""),
                     "landed": bool(lg.get("landed")),
+                    # Which metal flew it. actype has always been in the history
+                    # schema but was never put in the snapshot, so it arrived
+                    # empty on every leg ever ingested — the fleet breakdown
+                    # collapsed into a single bucket and quietly compared the
+                    # whole airline against itself. registration is the field
+                    # AIMS actually serves.
+                    "actype": lg.get("actype", ""),
+                    "registration": lg.get("registration", ""),
                     "crew": sorted(crew_of.get(lg["legid"], ())),
                     # Rank per person, so the study can separate flight deck from
                     # cabin. Empty when AIMS gave us nothing we could read.
