@@ -45,12 +45,23 @@ jobs:
             python -m playwright install --with-deps chromium
           fi
 
+      # ECREW_CREW_ALL=1: fetch a crew list for EVERY leg, domestic included.
+      # Without it the history that rides along below has a hole exactly where
+      # the analysis needs one filled — a crew that flew home and stayed there is
+      # invisible on a domestic leg carrying no crew, so their layover reads as
+      # days long. The Feb–Jul backfill was scanned with crew_all; leaving it off
+      # here would keep re-opening the same hole from today forward, which is
+      # where the 8415 crewless legs in the last report came from.
+      #
+      # It costs roughly triple the scan time. Minutes are unmetered on a public
+      # repo and a three-day window still finishes in a few minutes.
       - name: Run layover detection
         env:
           ECREW_USERNAME: ${{ secrets.ECREW_USERNAME }}
           ECREW_PASSWORD: ${{ secrets.ECREW_PASSWORD }}
           ECREW_DAYS: ${{ github.event.inputs.days || '1' }}
           ECREW_BACKFILL: '1'
+          ECREW_CREW_ALL: '1'
         run: |
           python scripts/ecrew_layovers.py
 
