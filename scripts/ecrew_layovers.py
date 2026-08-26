@@ -436,6 +436,7 @@ async def main() -> None:
         names = {}     # person id -> "NAME SURNAME" (for member tags)
         ranks = {}     # person id -> rank ("CP"/"FO"/cabin code), for the study
         rank_keys_reported = False
+        crew_keys_reported = False
         if SKIP_CREW:
             # Schedule-only scan. Crew lookup is one request PER LEG and dominates
             # the runtime, but questions about the SHAPE of the schedule — how long
@@ -450,6 +451,15 @@ async def main() -> None:
             names.update(person_names(crew_rows))
             found = crew_ranks(crew_rows)
             ranks.update(found)
+            if crew_rows and not crew_keys_reported:
+                # Print the crew row's shape ONCE, every run, whether or not the
+                # parse worked. The aircraft type sat unread in `registrations`
+                # for months because nobody looked at a value — the field was
+                # judged by its name. The WhatsApp channel now needs to know
+                # whether a phone number is in here, and the answer must come
+                # from the row, not from a guess about it.
+                crew_keys_reported = True
+                print(f"crew row keys: {sorted((crew_rows[0] or {}).keys())}")
             if not found and crew_rows and not rank_keys_reported:
                 # Same failure the aircraft type hit: guessing a field name and
                 # getting silence. Print the row's shape once so the next run can
