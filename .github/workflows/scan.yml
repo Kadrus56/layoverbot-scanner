@@ -1,4 +1,4 @@
-name: eCrew Layovers (hourly scan, delivered to Oracle)
+name: eCrew Layovers (manual scan, delivered to Oracle)
 
 # Lives in a PUBLIC repo on purpose: GitHub Actions minutes are metered on a
 # private repo and unmetered on a public one, and this hourly scan is what was
@@ -7,8 +7,19 @@ name: eCrew Layovers (hourly scan, delivered to Oracle)
 # inside this run and shipped straight to Oracle over SSH.
 
 on:
-  schedule:
-    - cron: '7 * * * *'
+  # The hourly schedule is OFF as of 2026-10-12. The layover product is parked:
+  # the crew are not on Telegram, and WhatsApp will not let a bot create a group
+  # or add anyone to one, which was the whole point of it.
+  #
+  # Nothing reads this scan's output any more — the bot's layover jobs are
+  # switched off behind LAYOVER_FEATURES_ENABLED=0 — so every hour it ran was a
+  # login to eCrew with the owner's own credentials for data nobody looked at.
+  # That, not the Actions minutes, is why it had to stop.
+  #
+  # Commented rather than deleted: resuming the product means uncommenting these
+  # two lines, and a deleted schedule is one nobody remembers to put back.
+  # schedule:
+  #   - cron: '7 * * * *'
   workflow_dispatch:
     inputs:
       days:
